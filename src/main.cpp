@@ -1,30 +1,100 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
+#include "DHTesp.h"
+#include "Ticker.h"
+
+#define PRINT_DEBUG_MESSAGES
 
 #define MODULE_NAME "esp8266-climate-station"
+#define DHT_PIN D2
+#define SENDING_INTERVAL 30*1000
 
 void initWiFi();
 void initOTA();
+void collectData();
+void sendData();
+
+const char* server = "api.thingspeak.com";
+WiFiClient  client;
+DHTesp dht;
+Ticker sendTimer(collectData, SENDING_INTERVAL);
+String data;
+bool hasData = false;
 
 void setup() {
   Serial.begin(115200);
-  Serial.print("[");
-  Serial.print(MODULE_NAME);
-  Serial.println("] Start setup");
+  Serial.println();
+  Serial.println("[" + String(MODULE_NAME) + "] Start setup");
   initWiFi();
   initOTA();
+
+  dht.setup(DHT_PIN, DHTesp::DHT22);
+
+  sendTimer.start();
 }
 
 void loop() {
   ArduinoOTA.handle();
   yield();
+  sendTimer.update();
+  sendData();
+}
+
+void collectData(){
+  data = String();
+  float temperature = dht.getTemperature();
+  if(temperature != NAN){
+    Serial.print("\tTemperature: " + String(temperature));
+    data += "&field1=" + String(temperature);
+  }
+  float humidity = dht.getHumidity();
+  if(humidity != NAN){
+    Serial.print("\tHumidity: " + String(humidity));
+    data += "&field2=" +  String(humidity);
+  }
+  Serial.println();
+  hasData = true;
+}
+
+void sendData(){
+  if(hasData){
+    if (!client.connect(server, 80)) {
+      Serial.println("connection failed");
+      return;
+    }
+    String Link="GET /update?api_key="+String(API_KEY);  //Requeste webpage  
+    Link = Link + data;
+    Link = Link + " HTTP/1.1\r\n" + "Host: " + server + "\r\n" + "Connection: close\r\n\r\n";                
+    client.print(Link);
+
+    //---------------------------------------------------------------------
+    //Wait for server to respond with timeout of 5 seconds
+    int timeout=0;
+    while((!client.available()) && (timeout < 500))     //Wait 5 seconds for data
+    {
+      delay(10);  //Use this with time out
+      timeout++;
+      yield();
+    }
+  
+    //---------------------------------------------------------------------
+    //If data is available before time out read it.
+    if(timeout < 500)
+    {
+        while(client.available()){
+            Serial.println(client.readString()); //Response from ThingSpeak       
+        }
+    }
+    else
+      Serial.println("Request timeout..");
+    hasData = false;
+  }
 }
 
 void initWiFi(){
   WiFi.mode(WIFI_STA);
   WiFi.setAutoConnect(true);
   WiFi.setAutoReconnect(true);
-  Serial.println("");
   Serial.print("ssid: ");
   Serial.println(WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -33,7 +103,7 @@ void initWiFi(){
     Serial.print(WiFi.status());
   }
   
-  Serial.print("IP address: ");
+  Serial.print("\nIP address: ");
   Serial.println(WiFi.localIP());
 }
 
