@@ -2,11 +2,14 @@
 #include <ArduinoOTA.h>
 #include "DHTesp.h"
 #include "Ticker.h"
+#include <TroykaMQ.h>
 
 #define PRINT_DEBUG_MESSAGES
 
 #define MODULE_NAME "esp8266-climate-station"
 #define DHT_PIN D2
+#define PIN_MQ135  A0
+#define PIN_MQ135_CALIBRATION  45
 #define SENDING_INTERVAL 30*1000
 
 void initWiFi();
@@ -17,6 +20,7 @@ void sendData();
 const char* server = "api.thingspeak.com";
 WiFiClient  client;
 DHTesp dht;
+MQ135 mq135(PIN_MQ135);
 Ticker sendTimer(collectData, SENDING_INTERVAL);
 String data;
 bool hasData = false;
@@ -29,6 +33,7 @@ void setup() {
   initOTA();
 
   dht.setup(DHT_PIN, DHTesp::DHT22);
+  mq135.calibrate(PIN_MQ135_CALIBRATION);
 
   sendTimer.start();
 }
@@ -51,6 +56,16 @@ void collectData(){
   if(humidity != NAN){
     Serial.print("\tHumidity: " + String(humidity));
     data += "&field2=" +  String(humidity);
+  }
+  unsigned long CO2 = mq135.readCO2();
+  if(CO2 != NAN){
+    Serial.print("\CO2: " + String(CO2));
+    data += "&field3=" +  String(CO2);
+  }
+  unsigned long correctedCO2 = mq135.readCorrectedCO2(temperature, humidity);
+  if(temperature != NAN && humidity != NAN && correctedCO2 != NAN){
+    Serial.print("\Cor CO2: " + String(correctedCO2));
+    data += "&field4=" +  String(correctedCO2);
   }
   Serial.println();
   hasData = true;
