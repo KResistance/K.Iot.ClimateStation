@@ -7,15 +7,6 @@
 #include <TroykaMQ.h>
 #include "sntp.h"
 
-// !IMPORTANT! TODO (k.german): Send data to graphite from MH-Z19B and BME280.
-
-// TODO (k.german): Add debug DEFINEs, IFDEFs, etc.
-
-// TODO (k.german): Enable/disable WiFi and sending data by #define?
-
-// TODO (k.german): Overused delay function. Schedule measuring and remember
-// to yield in order to get WiFi's and other peripheral's stuff done.
-
 // Parameters
 #define MODULE_NAME "esp8266-climate-station"
 
@@ -28,9 +19,6 @@
 #define DHT_SAMPLE_TIMES 5
 #define DHT_SAMPLE_INTERVAL 20 // ms
 
-#define MQ135_PIN A0 // also ADC0
-#define MQ135_PIN_CALIBRATION 45
-
 #define Z19B_PWM_PIN D5 // also GPIO14/SCLK
 #define Z19B_RX_PIN D6  // also GPIO12/MISO
 #define Z19B_TX_PIN D7  // also GPIO13/MOSI/RXD2
@@ -42,14 +30,18 @@ class BME280Sensor
 {
 public:
 	using SensorSampling = Adafruit_BME280::sensor_sampling;
+	struct Data
+	{
+		float temperature{ NAN };
+		float humidity{ NAN };
+		float pressure{ NAN };
+	};
 
 private:
 	SensorSampling sampling_;
 	uint8_t address_;
 	Adafruit_BME280 bme_{}; // SCL=D1, SDA=D2, VIN=3.3V, GND=GND
-	float temperature_{ NAN };
-	float humidity_{ NAN };
-	float pressure_{ NAN };
+	Data data_{};
 
 public:
 	BME280Sensor(
@@ -92,51 +84,25 @@ public:
 	void print_measurements()
 	{
 		Serial.println("# BME280::info");
-		Serial.printf("Temperature =\t%e\n", temperature_);
-		Serial.printf("Humidity =\t%e\n", humidity_);
-		Serial.printf("Pressure =\t%e\n", pressure_);
+		Serial.printf("Temperature =\t%e\n", data_.temperature);
+		Serial.printf("Humidity =\t%e\n", data_.humidity);
+		Serial.printf("Pressure =\t%e\n", data_.pressure);
 	}
 
 	void measure()
 	{
+		data_ = {};
 		bme_.takeForcedMeasurement();
-		temperature_ = bme_.readTemperature();
-		humidity_ = bme_.readHumidity();
-		pressure_ = bme_.readPressure() / 100.0F;
+		data_.temperature = bme_.readTemperature();
+		data_.humidity = bme_.readHumidity();
+		data_.pressure = bme_.readPressure() / 100.0F;
 	}
 
-	float temperature()
+	const Data& data() const noexcept
 	{
-		return temperature_;
-	}
-
-	float humidity()
-	{
-		return humidity_;
-	}
-
-	float pressure()
-	{
-		return pressure_;
+		return data_;
 	}
 };
-
-// NOTE (k.german): Used for checking response MH-Z19B.
-byte calc_crc(const byte* data)
-{
-	byte i;
-	byte crc = 0;
-
-	for (i = 1; i < 8; i++)
-	{
-		crc += data[i];
-	}
-
-	crc = 255 - crc;
-	crc++;
-
-	return crc;
-}
 
 namespace mhz19b_commands {
 	const byte WRITE[9]{0xFF, 0x01, 0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -146,9 +112,16 @@ namespace mhz19b_commands {
 
 class MHZ19BSensor
 {
+public:
+	struct Data
+	{
+		int32_t co2;
+	};
+
 private:
 	SoftwareSerial sw_serial_;
 	uint8_t pwm_pin_;
+	Data data_{};
 
 public:
 	MHZ19BSensor(int rx_pin, int tx_pin, uint8_t pwm_pin)
@@ -169,11 +142,9 @@ public:
 		  10000 ppm range: 0xFF, 0x01, 0x99, 0x00, 0x00, 0x00, 0x27, 0x10,
 		*/
 
-		// Этот вариант ("A") с записью команды в 6й и 7й байт - работает
-		//           bytes:                          3     4           6     7
-		const byte setrangeA_cmd[8] = {0xFF, 0x01, 0x99, 0x00, 0x00, 0x00, 0x13, 0x88}; // задаёт диапазон 0 - 5000ppm
-		sw_serial_.write(setrangeA_cmd,9);
-		sw_serial_.write(calc_crc(setrangeA_cmd));
+		const byte setrange_command[8] = {0xFF, 0x01, 0x99, 0x00, 0x00, 0x00, 0x13, 0x88}; // задаёт диапазон 0 - 5000ppm
+		sw_serial_.write(setrange_command, 9);
+		sw_serial_.write(calc_crc(setrange_command));
 		sw_serial_.flush();
 
 		byte setrangeA_response[9];
@@ -215,12 +186,11 @@ public:
 		}
 	}
 
-	void measure() {
-		unsigned char measure_response[9]{};
+	bool measure_by_uart()
+	{
+		Serial.println("# MH-Z19B::measure_by_uart");
+		data_.co2 = 0;
 
-		Serial.println("# MH-Z19B::measure");
-
-		// Check CO2 concentration by UART
 		while (sw_serial_.available() > 0)
 		{
 			sw_serial_.read();
@@ -228,37 +198,63 @@ public:
 
 		sw_serial_.write(mhz19b_commands::MEASURE, 9);
 		sw_serial_.flush();
+
+		unsigned char measure_response[9]{};
 		sw_serial_.readBytes(measure_response, 9);
 		byte crc = calc_crc(measure_response);
 
 		if (!(measure_response[0] == 0xFF && measure_response[1] == 0x86 && measure_response[8] == crc))
 		{
 			Serial.println("CRC error: " + String(crc) + " / "+ String(measure_response[8]));
+			return false;
 		}
 
-		// FIXME: static_cast or reinterpret_cast?
-		unsigned int responseHigh{ static_cast<unsigned int>(measure_response[2]) };
-		unsigned int responseLow{ static_cast<unsigned int>(measure_response[3]) };
-		unsigned long ppm = 256 * responseHigh + responseLow;
+		uint16_t responseHigh{ measure_response[2] };
+		uint16_t responseLow{ measure_response[3] };
+		data_.co2 = (responseHigh << 8) + responseLow;
+		data_.co2 = (data_.co2 / 5) * 2;
 
-		// Check CO2 concentration by PWM
-		unsigned long th{ 0 }, ppm2{ 0 };
+		Serial.print("ppm =\t");
+		Serial.println(data_.co2);
+
+		return true;
+	}
+
+	void measure_by_pwm()
+	{
+		Serial.println("# MH-Z19B::measure_by_pwm");
+		data_.co2 = 0;
+		unsigned long th{ 0 };
 
 		while (th == 0)
 		{
 			th = pulseIn(pwm_pin_, HIGH, 1004000) / 1000;
 			unsigned long tl = 1004 - th;
-			ppm2 =  2000 * (th-2)/(th+tl-4); // расчёт для диапазона от 0 до 2000ppm
+			data_.co2 =  2000 * (th - 2) / (th + tl - 4); // Range between 0 and 2000 ppm.
 		}
 
-		Serial.print("ppm (UART) =\t");
-		Serial.println(ppm);
-		Serial.print("ppm (two fifths of it; real value) =\t");
-		Serial.println((ppm / 5) * 2);
-		Serial.print("Time while PWM was HIGH (ms) =\t");
-		Serial.println(th);
-		Serial.print("ppm (PWM; valid range) =\t");
-		Serial.println(ppm2);
+		Serial.print("ppm =\t");
+		Serial.println(data_.co2);
+	}
+
+	const Data& data() const noexcept
+	{
+		return data_;
+	}
+
+private:
+	byte calc_crc(const byte* data)
+	{
+		byte crc = 0;
+
+		for (byte i = 1; i < 8; i++)
+		{
+			crc += data[i];
+		}
+
+		crc = ~crc + 1;
+
+		return crc;
 	}
 };
 
@@ -279,7 +275,8 @@ private:
 	int temperature_samples_{};
 
 public:
-	DHT22Sensor(uint8_t out_pin, int sampling_times = 1, int sampling_interval = 20)
+	DHT22Sensor(
+		const uint8_t out_pin, const int sampling_times = 1, const int sampling_interval = 20)
 		: out_pin_{ out_pin }
 		, sampling_times_{ sampling_times }
 		, sampling_interval_{ sampling_interval }
@@ -420,7 +417,6 @@ public:
 BME280Sensor bme280_sensor{};
 MHZ19BSensor mhz19b_sensor{ Z19B_RX_PIN, Z19B_TX_PIN, Z19B_PWM_PIN };
 DHT22Sensor dht22_sensor{ DHT_OUT_PIN, DHT_SAMPLE_TIMES, DHT_SAMPLE_INTERVAL };
-MQ135Sensor mq135_sensor{ MQ135_PIN };
 
 void initOTA();
 void collectData();
@@ -454,25 +450,24 @@ void setup()
 	mhz19b_sensor.setup();
 	bme280_sensor.setup();
 	dht22_sensor.setup();
-	mq135_sensor.setup();
 
-	// initWiFi();
+	initWiFi();
 	initOTA();
 
-	// configTime(0, 0, "time.google.com", "ru.pool.ntp.org");
-	// int last = 0;
-  //
-	// while(sntp_get_current_timestamp() < 1500000000)
-	// {
-	// 	if((millis() - last) > 1000)
-	// 	{
-	// 		last = millis();
-	// 		Serial.println(sntp_get_current_timestamp());
-	// 		Serial.println("Waiting for sntp.");
-	// 	}
+	configTime(0, 0, "time.google.com", "ru.pool.ntp.org");
+	int last = 0;
 
-	// 	yield();
-	// }
+	while(sntp_get_current_timestamp() < 1500000000)
+	{
+		if((millis() - last) > 1000)
+		{
+			last = millis();
+			Serial.println(sntp_get_current_timestamp());
+			Serial.println("Waiting for sntp.");
+		}
+
+		yield();
+	}
 }
 
 void loop()
@@ -481,7 +476,7 @@ void loop()
 	yield();
 	collectData();
 	yield();
-	// sendData();
+	sendData();
 	delay(1000);
 }
 
@@ -490,12 +485,11 @@ void collectData()
 	sampling_time = sntp_get_current_timestamp();
 
 	dht22_sensor.measure();
-	const auto& dht22_data = dht22_sensor.data();
-	mq135_sensor.measure(dht22_data.temperature, dht22_data.humidity);
-
-	// FIXME: No output :C
-	mhz19b_sensor.measure();
 	bme280_sensor.measure();
+
+	// FIXME (k.german): Choose one way. Or use one way as a fallback.
+	mhz19b_sensor.measure_by_uart();
+	mhz19b_sensor.measure_by_pwm();
 
 	delay(1000);
 }
@@ -503,30 +497,44 @@ void collectData()
 void sendData()
 {
 	// TODO (k.german): printf to buffer?
-
 	String time_str{ sampling_time };
-	String data{};
+	String message{};
+
 	const auto& dht22_data = dht22_sensor.data();
 
 	if (!isnan(dht22_data.temperature))
 	{
-		data += GRAPHITE_PREFIX "t.avg " + String(dht22_data.temperature) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "dht22.t.avg " + String(dht22_data.temperature) + ' ' + time_str + '\n';
 	}
 
 	if (!isnan(dht22_data.humidity))
 	{
-		data += GRAPHITE_PREFIX "h.avg " + String(dht22_data.humidity) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "dht22.h.avg " + String(dht22_data.humidity) + ' ' + time_str + '\n';
 	}
 
-	const auto co2 = mq135_sensor.data().co2;
+	// FIXME: Check if value is unavailable?
+	const auto co2 = mhz19b_sensor.data().co2;
+	message += GRAPHITE_PREFIX "co2.avg " + String(co2) + ' ' + time_str + '\n';
 
-	if (!isnan(co2))
+	const auto& bme280_data = bme280_sensor.data();
+
+	if (!isnan(bme280_data.temperature))
 	{
-		data += GRAPHITE_PREFIX "co2.avg " + String(co2) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "bme280.t.avg " + String(bme280_data.temperature) + ' ' + time_str + '\n';
+	}
+
+	if (!isnan(bme280_data.humidity))
+	{
+		message += GRAPHITE_PREFIX "bme280.h.avg " + String(bme280_data.humidity) + ' ' + time_str + '\n';
+	}
+
+	if (!isnan(bme280_data.pressure))
+	{
+		message += GRAPHITE_PREFIX "bme280.p.avg " + String(bme280_data.humidity) + ' ' + time_str + '\n';
 	}
 
 	Serial.println("*** GRAPHITE PACKAGE BEGIN ***");
-	Serial.print(data);
+	Serial.print(message);
 	Serial.println("*** GRAPHITE PACKAGE END ***");
 
 	yield();
@@ -543,7 +551,7 @@ void sendData()
 	}
 
 	Serial.println("Sending data to graphite " GRAPHITE_HOST ".");
-	client.println(data);
+	client.println(message);
 	// TODO (k.german): Ensure whether packet reaches its destination point or not.
 	// Wait for client.available()?
 	client.stop();
