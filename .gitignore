@@ -12,7 +12,6 @@
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
-!.vscode/launch.json
 !.vscode/extensions.json
 
 ### VisualStudioCode Patch ###
@@ -24,3 +23,4 @@
 # Secrets for compile time
 secrets.py
 
+__pycache__/*
