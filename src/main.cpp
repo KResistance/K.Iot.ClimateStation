@@ -9,6 +9,12 @@
 // Parameters
 #define SEND_INTERVAL 20 // in seconds
 
+// Correction
+#define TEMP_CORRECTION 0
+#define HUMIDITY_CORRETION 0
+#define PRESSURE_CORRECTION 0
+#define CO2_CORRECTION 0
+
 #define BME280_SCL_PIN D1 // also GPIO5/SCL
 #define BME280_SDA_PIN D2 // also GPIO4/SDA
 
@@ -126,37 +132,37 @@ void sendData()
 
 	if (!isnan(dht22_data.temperature))
 	{
-		message += GRAPHITE_PREFIX "dht22.t.avg " + String(dht22_data.temperature) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "dht22.t.avg " + String(dht22_data.temperature + TEMP_CORRECTION) + ' ' + time_str + '\n';
 	}
 
 	if (!isnan(dht22_data.humidity))
 	{
-		message += GRAPHITE_PREFIX "dht22.h.avg " + String(dht22_data.humidity) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "dht22.h.avg " + String(dht22_data.humidity + HUMIDITY_CORRETION) + ' ' + time_str + '\n';
 	}
 
 	// FIXME: Check if value is unavailable?
 	auto co2 = mhz19b_sensor.data().co2_uart;
 	if(!isnan(co2) != NAN)
-		message += GRAPHITE_PREFIX "co2_uart.avg " + String(co2) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "mhz19b.co2.uart.avg " + String(co2 + CO2_CORRECTION) + ' ' + time_str + '\n';
 	co2 = mhz19b_sensor.data().co2_pwm;
 	if(!isnan(co2) != NAN)
-		message += GRAPHITE_PREFIX "co2_pwm.avg " + String(co2) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "mhz19b.co2.pwm.avg " + String(co2 + CO2_CORRECTION) + ' ' + time_str + '\n';
 
 	const auto& bme280_data = bme280_sensor.data();
 
 	if (!isnan(bme280_data.temperature))
 	{
-		message += GRAPHITE_PREFIX "bme280.t.avg " + String(bme280_data.temperature) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "bme280.t.avg " + String(bme280_data.temperature + TEMP_CORRECTION) + ' ' + time_str + '\n';
 	}
 
 	if (!isnan(bme280_data.humidity))
 	{
-		message += GRAPHITE_PREFIX "bme280.h.avg " + String(bme280_data.humidity) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "bme280.h.avg " + String(bme280_data.humidity + HUMIDITY_CORRETION) + ' ' + time_str + '\n';
 	}
 
 	if (!isnan(bme280_data.pressure))
 	{
-		message += GRAPHITE_PREFIX "bme280.p.avg " + String(bme280_data.pressure) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "bme280.p.avg " + String(bme280_data.pressure + PRESSURE_CORRECTION) + ' ' + time_str + '\n';
 	}
 
 	Serial.println("*** GRAPHITE PACKAGE BEGIN ***");
