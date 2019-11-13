@@ -1,42 +1,81 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
-#include <DHTesp.h>
-#include <TroykaMQ.h>
 #include "sntp.h"
-
-#define PRINT_DEBUG_MESSAGES
+#include <Sensors/BME280Sensor.h>
+#include <Sensors/MHZ19BSensor.h>
+#include <Sensors/DHT22Sensor.h>
+#include <Sensors/MQ135Sensor.h>
 
 // Parameters
-#define MODULE_NAME "esp8266-climate-station"
+#define SEND_INTERVAL 20 // in seconds
 
-#define DHT_PIN D2
+// Correction
+#define TEMP_CORRECTION 0
+#define HUMIDITY_CORRETION 0
+#define PRESSURE_CORRECTION 0
+#define CO2_CORRECTION 0
+
+#define BME280_SCL_PIN D1 // also GPIO5/SCL
+#define BME280_SDA_PIN D2 // also GPIO4/SDA
+
+// NOTE (k.german): SDD3 used in QIO flashing mode. Therefore, use DIO mode
+// instead to free this pin. It can make troubles on some NodeMCU's devkits.
+#define DHT_OUT_PIN 10 // SDD3/GPIO10
 #define DHT_SAMPLE_TIMES 5
 #define DHT_SAMPLE_INTERVAL 20 // ms
 
-#define MQ135_PIN A0
-#define MQ135_PIN_CALIBRATION 45
+#define Z19B_PWM_PIN D5 // also GPIO14/SCLK
+#define Z19B_RX_PIN D6  // also GPIO12/MISO
+#define Z19B_TX_PIN D7  // also GPIO13/MOSI/RXD2
 
-WiFiClient client;
+WiFiClient client{};
+time_t sampling_time{};
 
-// Sensors
-DHTesp dht;
-MQ135 mq135{ MQ135_PIN };
-
-time_t sampling_time;
-
-TempAndHumidity dht_data;
-int humidity_samples;
-int temperature_samples;
-
-float co2;
+BME280Sensor bme280_sensor{};
+MHZ19BSensor mhz19b_sensor{ Z19B_RX_PIN, Z19B_TX_PIN, Z19B_PWM_PIN };
+DHT22Sensor dht22_sensor{ DHT_OUT_PIN, DHT_SAMPLE_TIMES, DHT_SAMPLE_INTERVAL };
 
 void initOTA();
 void collectData();
+void initWiFi();
 void sendData();
+void initNTP();
+
+
+void setup()
+{
+	Serial.begin(115200);
+	Serial.printf("\nStart setup \"%s\"\n", MODULE_NAME);
+
+	mhz19b_sensor.setup();
+	bme280_sensor.setup();
+	dht22_sensor.setup();
+
+	initWiFi();
+	initOTA();
+	initNTP();
+}
+
+static int last = 0;
+void loop()
+{
+	ArduinoOTA.handle();
+	yield();	
+	unsigned long now = millis();
+	if ((now - last) > SEND_INTERVAL * 1000) {
+		last = now;
+		collectData();
+		int waitAfterCollect = millis();
+  		while((millis() - waitAfterCollect) < 1000){
+			yield();
+		}
+		sendData();
+	}	
+}
 
 void initWiFi()
 {
-	Serial.printf("Init WiFi.\n");
+	Serial.println("# Init WiFi.");
 	Serial.printf("SSID: %s\n", WIFI_SSID);
 
 	WiFi.mode(WIFI_STA);
@@ -54,18 +93,8 @@ void initWiFi()
 	Serial.printf("WiFi local IP address: %s\n", ip.toString().c_str());
 }
 
-void setup() {
-	Serial.begin(115200);
-	Serial.printf("\nStart setup \"%s\"\n", MODULE_NAME);
-
-	dht.setup(DHT_PIN, DHTesp::DHT22);
-
-	mq135.calibrate(MQ135_PIN_CALIBRATION);
-	Serial.printf("MQ135:\nRo = %e\n", mq135.getRo());
-
-	initWiFi();
-	initOTA();
-
+void initNTP()
+{
 	configTime(0, 0, "time.google.com", "ru.pool.ntp.org");
 	int last = 0;
 
@@ -77,130 +106,67 @@ void setup() {
 			Serial.println(sntp_get_current_timestamp());
 			Serial.println("Waiting for sntp.");
 		}
-
 		yield();
 	}
 }
 
-void loop()
-{
-	ArduinoOTA.handle();
-	yield();
-	collectData();
-	yield();
-	sendData();
-	delay(1000);
-}
-
 void collectData()
 {
-	humidity_samples = 0;
-	temperature_samples = 0;
-	dht_data = {};
 	sampling_time = sntp_get_current_timestamp();
 
-	for (int i = 0; i < DHT_SAMPLE_TIMES; ++i)
-	{
-		const auto& dht_sample = dht.getTempAndHumidity();
+	dht22_sensor.measure();
+	bme280_sensor.measure();
 
-		if (dht_data.temperature != NAN)
-		{
-			Serial.printf("Temperature sample: %e\n", dht_sample.temperature);
-			dht_data.temperature += dht_sample.temperature;
-			++temperature_samples;
-		}
-		else
-		{
-			Serial.println("Temperature sample: NAN");
-		}
-
-		if (dht_data.humidity != NAN)
-		{
-			Serial.printf("Humidity sample: %e\n", dht_sample.humidity);
-			dht_data.humidity += dht_sample.humidity;
-			++humidity_samples;
-		}
-		else
-		{
-			Serial.println("Humidity sample: NAN");
-		}
-
-		delay(DHT_SAMPLE_INTERVAL);
-	}
-
-	if (humidity_samples >= 1)
-	{
-		dht_data.humidity /= humidity_samples;
-		Serial.printf("Humidity: %e\n", dht_data.humidity);
-	}
-	else
-	{
-		Serial.println("Humidity: NAN");
-	}
-
-	if (temperature_samples >= 1)
-	{
-		dht_data.temperature /= temperature_samples;
-		Serial.printf("Temperature: %e\n", dht_data.temperature);
-	}
-	else
-	{
-		Serial.println("Temperature: NAN");
-	}
-
-	co2 = NAN;
-
-	if (temperature_samples > 0 && humidity_samples > 0)
-	{
-		// TODO (k.german): unsigned long? float?
-		co2 = mq135.readCorrectedCO2(dht_data.temperature, dht_data.humidity);
-
-		if (co2 != NAN)
-		{
-			Serial.println("CO2 has been corrected.");
-		}
-	}
-
-	if (co2 == NAN)
-	{
-		// TODO (k.german): unsigned long? float?
-		co2 = mq135.readCO2();
-	}
-
-	if (co2 == NAN)
-	{
-		Serial.println("CO2: NAN");
-	}
-	else
-	{
-		Serial.printf("CO2: %e\n", co2);
-	}
+	// FIXME (k.german): Choose one way. Or use one way as a fallback.
+	mhz19b_sensor.measure_by_uart();
+	mhz19b_sensor.measure_by_pwm();
 }
 
 void sendData()
 {
 	// TODO (k.german): printf to buffer?
-
 	String time_str{ sampling_time };
-	String data{};
+	String message{};
 
-	if (temperature_samples > 0)
+	const auto& dht22_data = dht22_sensor.data();
+
+	if (!isnan(dht22_data.temperature))
 	{
-		data += GRAPHITE_PREFIX "t.avg " + String(dht_data.temperature) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "dht22.t.avg " + String(dht22_data.temperature + TEMP_CORRECTION) + ' ' + time_str + '\n';
 	}
 
-	if (humidity_samples > 0)
+	if (!isnan(dht22_data.humidity))
 	{
-		data += GRAPHITE_PREFIX "h.avg " + String(dht_data.humidity) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "dht22.h.avg " + String(dht22_data.humidity + HUMIDITY_CORRETION) + ' ' + time_str + '\n';
 	}
 
-	if (co2 != NAN)
+	// FIXME: Check if value is unavailable?
+	auto co2 = mhz19b_sensor.data().co2_uart;
+	if(!isnan(co2) != NAN)
+		message += GRAPHITE_PREFIX "mhz19b.co2.uart.avg " + String(co2 + CO2_CORRECTION) + ' ' + time_str + '\n';
+	co2 = mhz19b_sensor.data().co2_pwm;
+	if(!isnan(co2) != NAN)
+		message += GRAPHITE_PREFIX "mhz19b.co2.pwm.avg " + String(co2 + CO2_CORRECTION) + ' ' + time_str + '\n';
+
+	const auto& bme280_data = bme280_sensor.data();
+
+	if (!isnan(bme280_data.temperature))
 	{
-		data += GRAPHITE_PREFIX "co2.avg " + String(co2) + ' ' + time_str + '\n';
+		message += GRAPHITE_PREFIX "bme280.t.avg " + String(bme280_data.temperature + TEMP_CORRECTION) + ' ' + time_str + '\n';
+	}
+
+	if (!isnan(bme280_data.humidity))
+	{
+		message += GRAPHITE_PREFIX "bme280.h.avg " + String(bme280_data.humidity + HUMIDITY_CORRETION) + ' ' + time_str + '\n';
+	}
+
+	if (!isnan(bme280_data.pressure))
+	{
+		message += GRAPHITE_PREFIX "bme280.p.avg " + String(bme280_data.pressure + PRESSURE_CORRECTION) + ' ' + time_str + '\n';
 	}
 
 	Serial.println("*** GRAPHITE PACKAGE BEGIN ***");
-	Serial.print(data);
+	Serial.print(message);
 	Serial.println("*** GRAPHITE PACKAGE END ***");
 
 	yield();
@@ -217,7 +183,7 @@ void sendData()
 	}
 
 	Serial.println("Sending data to graphite " GRAPHITE_HOST ".");
-	client.println(data);
+	client.println(message);
 	// TODO (k.german): Ensure whether packet reaches its destination point or not.
 	// Wait for client.available()?
 	client.stop();
@@ -225,9 +191,10 @@ void sendData()
 
 void initOTA(){
 	// Port defaults to 8266
-	// ArduinoOTA.setPort(8266);
+	ArduinoOTA.setPort(OTA_PORT);
 
 	ArduinoOTA.setHostname(MODULE_NAME);
+	ArduinoOTA.setPassword(OTA_PASS);
 
 	ArduinoOTA.onStart([]() {
 		Serial.println("Start OTA");
